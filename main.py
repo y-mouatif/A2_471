@@ -1,4 +1,9 @@
 import pandas as pd
+from mlxtend.preprocessing import TransactionEncoder
+from mlxtend.frequent_patterns import apriori, association_rules
+import seaborn as sns
+import matplotlib.pyplot as plt
+
 
 # Part #1
 # Loading the Data
@@ -30,3 +35,30 @@ merged_data = pd.merge(ecommerce_data, product_details, on='ProductID', suffixes
 grouped = merged_data.groupby(['UserID', 'Category']).agg({'Rating': ['count', 'mean']}).reset_index()
 grouped.columns = ['UserID', 'Category', 'PurchaseCount', 'AverageRating']
 print(grouped.head())
+
+
+# Part #3
+# Convert into transactions
+transactions = merged_data.groupby("UserID")["ProductID"].apply(list).tolist()
+te = TransactionEncoder()
+te_ary = te.fit(transactions).transform(transactions)
+df_transactions = pd.DataFrame(te_ary, columns=te.columns_)
+
+# Apply Apriori and generate rules
+frequent_itemsets = apriori(df_transactions, min_support=0.05, use_colnames=True)
+rules = association_rules(frequent_itemsets, metric="confidence", min_threshold=0.5)
+print(rules[['antecedents', 'consequents', 'support', 'confidence', 'lift']].head())
+
+# Part #4
+# Heat map visualizations
+plt.figure(figsize=(10, 8))
+sns.heatmap(df_transactions.corr(), cmap='YlGnBu')
+plt.title('User Similarity Heatmap')
+plt.show()
+
+# Frequent itemsets bar chart
+frequent_itemsets.nlargest(10, 'support').plot(kind='bar', x='itemsets', y='support', legend=False)
+plt.title('Top 10 Frequent Itemsets')
+plt.xticks(rotation=45)
+plt.tight_layout()
+plt.show()

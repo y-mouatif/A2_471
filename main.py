@@ -23,6 +23,15 @@ ecommerce_data['Timestamp'] = pd.to_datetime(ecommerce_data['Timestamp'])
 # users as rows, products as columns, ratings as values
 user_item_matrix = ecommerce_data.pivot_table(index='UserID', columns='ProductID', values='Rating')
 
+# Calculating the sparsity of user-item matrix
+num_users, num_items = user_item_matrix.shape
+total_possible = num_users * num_items
+actual_ratings = user_item_matrix.count().sum()
+sparsity = 1 - (actual_ratings / total_possible)
+
+print(f"Sparsity of user-item matrix: {sparsity:.2%}")
+
+
 # Handle missing values by filling them with 0 //for now 
 user_item_matrix_filled = user_item_matrix.fillna(0)
 print(user_item_matrix_filled.head())
@@ -47,31 +56,44 @@ user_similarity_df = pd.DataFrame(user_similarity, index=user_item_matrix_filled
 print(user_similarity_df.head())
 
 # Get Top-N Similar Users for Each User
-def get_top_n_similar_users(user_id, n=5):
+def get_top_n_similar_users(user_id, n=5, threshold=0.1):
     if user_id not in user_similarity_df:
         return []
-    # Sort users by similarity score
     sorted_users = user_similarity_df[user_id].sort_values(ascending=False)
-    # Exclude the user themself
-    top_users = sorted_users.drop(user_id).head(n)
-    return top_users.index.tolist()
+    # Filter out weak similarities and the user themself
+    filtered = sorted_users[(sorted_users > threshold) & (sorted_users.index != user_id)]
+    return filtered.head(n).index.tolist()
 
-# Recommend Products Based on Similar Users
+
+# Function to recommend products for a given user based on similar users
 def recommend_products(user_id, n_similar=5, n_recommendations=5):
+    # Skip if user not found in matrix
     if user_id not in user_item_matrix_filled.index:
         return []
     
+    # Get top N similar users with similarity threshold applied
     top_users = get_top_n_similar_users(user_id, n_similar)
+    if not top_users:
+        return []
     
+    # Identify which products the current user hasn't rated yet
     user_ratings = user_item_matrix_filled.loc[user_id]
     unseen_products = user_ratings[user_ratings == 0].index
 
-    # Aggregate ratings from similar users
+    # Get ratings from similar users for only unseen products
     similar_users_ratings = user_item_matrix_filled.loc[top_users]
-    avg_ratings = similar_users_ratings[unseen_products].mean(axis=0)
     
+    # Only consider ratings that are 3 or higher (positive feedback)
+    positive_ratings = similar_users_ratings[unseen_products]
+    positive_ratings = positive_ratings.where(positive_ratings >= 3)
+
+    # Average the ratings from similar users and drop products with no ratings
+    avg_ratings = positive_ratings.mean(axis=0).dropna()
+    if avg_ratings.empty:
+        return []
+    
+     # Return top-N products with highest average rating
     top_products = avg_ratings.sort_values(ascending=False).head(n_recommendations)
-    
     return top_products.index.tolist()
 
 # Generate Recommendations for All Users
@@ -84,24 +106,66 @@ recommendations_df = pd.DataFrame.from_dict(recommendations, orient='index')
 recommendations_df.columns = [f"Rec_{i+1}" for i in range(recommendations_df.shape[1])]
 print(recommendations_df.head())
 
-# Evaluate with Precision@K
-def precision_at_k(user_id, recommended_items, k=5):
-    actual_items = set(ecommerce_data[ecommerce_data['UserID'] == user_id]['ProductID'])
-    recommended_items = set(recommended_items[:k])
-    if not actual_items:
-        return 0.0
-    return len(actual_items.intersection(recommended_items)) / k
+# Create a mapping from ProductID to Category
+product_to_category = product_details.set_index('ProductID')['Category'].to_dict()
 
+# Precision@K: How many of the recommended categories match the user’s actual preferred categories
+def precision_at_k(user_id, recommended_items, k=5):
+    actual_positive_categories = set(
+        ecommerce_data[
+            (ecommerce_data['UserID'] == user_id) & 
+            (ecommerce_data['Rating'] >= 3)
+        ]['ProductID'].map(product_to_category)
+    )
+
+    recommended_categories = set(pd.Series(recommended_items[:k]).map(product_to_category))
+
+    if not actual_positive_categories:
+        return 0.0
+
+    return len(actual_positive_categories.intersection(recommended_categories)) / k
+
+# Recall@K: How many of the user's actual preferred categories are captured in the recommendations
+def recall_at_k(user_id, recommended_items, k=5):
+    actual_positive_categories = set(
+        ecommerce_data[
+            (ecommerce_data['UserID'] == user_id) & 
+            (ecommerce_data['Rating'] >= 3)
+        ]['ProductID'].map(product_to_category)
+    )
+
+    recommended_categories = set(pd.Series(recommended_items[:k]).map(product_to_category))
+
+    if not actual_positive_categories:
+        return 0.0
+
+    return len(actual_positive_categories.intersection(recommended_categories)) / len(actual_positive_categories)
+
+# Collect precision and recall scores across all users
 precision_scores = []
+recall_scores = []
+
+# Compute average precision and recall for the entire system
 for user in recommendations_df.index:
     recommended = recommendations_df.loc[user].dropna().tolist()
     precision_scores.append(precision_at_k(user, recommended))
+    recall_scores.append(recall_at_k(user, recommended))
 
-print(f"\nAverage Precision@5: {sum(precision_scores) / len(precision_scores):.2f}")
+avg_precision = sum(precision_scores) / len(precision_scores)
+avg_recall = sum(recall_scores) / len(recall_scores)
+
+print(f"Average Precision@5: {avg_precision:.2f}")
+print(f"Average Recall@5: {avg_recall:.2f}")
+
+# Calculate coverage: % of users who received at least 1 recommendation
+users_with_recommendations = recommendations_df.apply(lambda row: row.notna().any(), axis=1).sum()
+total_users = len(recommendations_df)
+coverage = users_with_recommendations / total_users
+
+print(f"Recommendation Coverage: {coverage:.2%}")
 
 #output to csv
 recommendations_df.to_csv("recommendations_output.csv", index=True)
-
 
 
 # Part #3
